@@ -12,8 +12,10 @@ in the source distribution for its full text.
 #include <libproc.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 
 /*{
 #include "Settings.h"
@@ -212,7 +214,7 @@ ERROR_B:
 ERROR_A:
    retval = xStrdup(k->kp_proc.p_comm);
    *basenameOffset = strlen(retval);
-   
+
    return retval;
 }
 
@@ -263,23 +265,32 @@ void DarwinProcess_setFromKInfoProc(Process *proc, struct kinfo_proc *ps, time_t
 void DarwinProcess_setFromLibprocPidinfo(DarwinProcess *proc, DarwinProcessList *dpl) {
    struct proc_taskinfo pti;
 
+/*   mach_timebase_info_data_t tb = { 0 };
+   mach_timebase_info(&tb);*/
+   uint64_t clockbase = 36000000; //((uint64_t)1000000000LL * (uint64_t)tb.numer) / (uint64_t)tb.denom;
+   //uint64_t clockbase = 10000000LL;
+
+   //clockbase = sysconf(_SC_CLK_TCK);
+   double clockbaseFp = clockbase; // (1000000000.0 * (double)tb.numer) / (double)tb.denom;
+   double clockbaseInvFp = 1.0 / clockbaseFp;
+
    if(sizeof(pti) == proc_pidinfo(proc->super.pid, PROC_PIDTASKINFO, 0, &pti, sizeof(pti))) {
       if(0 != proc->utime || 0 != proc->stime) {
          uint64_t diff = (pti.pti_total_system - proc->stime)
                   + (pti.pti_total_user - proc->utime);
 
-         proc->super.percent_cpu = (double)diff * (double)dpl->super.cpuCount
-                  / ((double)dpl->global_diff * 100000.0);
+         proc->super.percent_cpu = ((double)diff * clockbaseInvFp) * (double)dpl->super.cpuCount
+                  / ((double)dpl->global_diff) * 100.0;
 
 //       fprintf(stderr, "%f %llu %llu %llu %llu %llu\n", proc->super.percent_cpu,
 //               proc->stime, proc->utime, pti.pti_total_system, pti.pti_total_user, dpl->global_diff);
 //       exit(7);
       }
 
-      proc->super.time = (pti.pti_total_system + pti.pti_total_user) / 10000000;
+      proc->super.time = (pti.pti_total_system + pti.pti_total_user) / clockbase;
       proc->super.nlwp = pti.pti_threadnum;
-      proc->super.m_size = pti.pti_virtual_size / 1024 / PAGE_SIZE_KB;
-      proc->super.m_resident = pti.pti_resident_size / 1024 / PAGE_SIZE_KB;
+      proc->super.m_size = pti.pti_virtual_size / (uint64_t)PAGE_SIZE;
+      proc->super.m_resident = pti.pti_resident_size / (uint64_t)PAGE_SIZE;
       proc->super.majflt = pti.pti_faults;
       proc->super.percent_mem = (double)pti.pti_resident_size * 100.0
               / (double)dpl->host_info.max_mem;
@@ -302,11 +313,11 @@ void DarwinProcess_setFromLibprocPidinfo(DarwinProcess *proc, DarwinProcessList 
 void DarwinProcess_scanThreads(DarwinProcess *dp) {
    Process* proc = (Process*) dp;
    kern_return_t ret;
-   
+
    if (!dp->taskAccess) {
       return;
    }
-   
+
    if (proc->state == 'Z') {
       return;
    }
@@ -317,7 +328,7 @@ void DarwinProcess_scanThreads(DarwinProcess *dp) {
       dp->taskAccess = false;
       return;
    }
-   
+
    task_info_data_t tinfo;
    mach_msg_type_number_t task_info_count = TASK_INFO_MAX;
    ret = task_info(port, TASK_BASIC_INFO, (task_info_t) tinfo, &task_info_count);
@@ -325,7 +336,7 @@ void DarwinProcess_scanThreads(DarwinProcess *dp) {
       dp->taskAccess = false;
       return;
    }
-   
+
    thread_array_t thread_list;
    mach_msg_type_number_t thread_count;
    ret = task_threads(port, &thread_list, &thread_count);
@@ -334,7 +345,7 @@ void DarwinProcess_scanThreads(DarwinProcess *dp) {
       mach_port_deallocate(mach_task_self(), port);
       return;
    }
-   
+
    integer_t run_state = 999;
    for (unsigned int i = 0; i < thread_count; i++) {
       thread_info_data_t thinfo;

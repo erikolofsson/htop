@@ -20,6 +20,7 @@ in the source distribution for its full text.
 #include <err.h>
 #include <sys/sysctl.h>
 #include <stdbool.h>
+#include <mach/mach_time.h>
 
 struct kern {
     short int version[3];
@@ -174,11 +175,17 @@ void ProcessList_goThroughEntries(ProcessList* super) {
     ProcessList_allocateCPULoadInfo(&dpl->curr_load);
     ProcessList_getVMStats(&dpl->vm_stats);
 
+   //mach_timebase_info_data_t tb = { 0 };
+   //mach_timebase_info(&tb);
+   //uint64_t clockbase = (1000000000LL * tb.numer) / tb.denom;
+   //fprintf(stderr, "clockbase %lu\n", sysconf(_SC_CLK_TCK));
+
+    double secondsPerTick = 1.0 / (double)sysconf(_SC_CLK_TCK);
     /* Get the time difference */
-    dpl->global_diff = 0;
+    dpl->global_diff = 0.0;
     for(int i = 0; i < dpl->super.cpuCount; ++i) {
         for(size_t j = 0; j < CPU_STATE_MAX; ++j) {
-            dpl->global_diff += dpl->curr_load[i].cpu_ticks[j] - dpl->prev_load[i].cpu_ticks[j];
+            dpl->global_diff += (double)(dpl->curr_load[i].cpu_ticks[j] - dpl->prev_load[i].cpu_ticks[j]) * secondsPerTick;
         }
     }
 
