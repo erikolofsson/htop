@@ -40,11 +40,11 @@ const ProcessFieldData Process_fields[LAST_PROCESSFIELD] = {
    [ELAPSED] = { .name = "ELAPSED", .title = "ELAPSED  ", .description = "Time since the process was started", .flags = 0, },
    [PROCESSOR] = { .name = "PROCESSOR", .title = "CPU ", .description = "Id of the CPU the process last executed on", .flags = 0, },
    [M_VIRT] = { .name = "M_VIRT", .title = " VIRT ", .description = "Total program size in virtual memory", .flags = 0, .defaultSortDesc = true, },
-   [M_RESIDENT] = { .name = "M_RESIDENT", .title = "  RES ", .description = "Resident set size, size of the text and data sections, plus stack usage", .flags = 0, .defaultSortDesc = true, },
+   [M_RESIDENT] = { .name = "M_RESIDENT", .title = "  RES ", .description = "Physical memory footprint (anonymous, dirty and compressed memory, as in Activity Monitor)", .flags = PROCESS_FLAG_DARWIN_FOOTPRINT, .defaultSortDesc = true, },
    [ST_UID] = { .name = "ST_UID", .title = "UID", .description = "User ID of the process owner", .flags = 0, },
    [PERCENT_CPU] = { .name = "PERCENT_CPU", .title = " CPU%", .description = "Percentage of the CPU time the process used in the last sampling", .flags = 0, .defaultSortDesc = true, .autoWidth = true, .autoTitleRightAlign = true, },
    [PERCENT_NORM_CPU] = { .name = "PERCENT_NORM_CPU", .title = "NCPU%", .description = "Normalized percentage of the CPU time the process used in the last sampling (normalized by cpu count)", .flags = 0, .defaultSortDesc = true, .autoWidth = true, },
-   [PERCENT_MEM] = { .name = "PERCENT_MEM", .title = "MEM% ", .description = "Percentage of the memory the process is using, based on resident memory size", .flags = 0, .defaultSortDesc = true, },
+   [PERCENT_MEM] = { .name = "PERCENT_MEM", .title = "MEM% ", .description = "Percentage of the memory the process is using, based on its memory footprint", .flags = PROCESS_FLAG_DARWIN_FOOTPRINT, .defaultSortDesc = true, },
    [USER] = { .name = "USER", .title = "USER       ", .description = "Username of the process owner (or user ID if name cannot be determined)", .flags = 0, },
    [TIME] = { .name = "TIME", .title = "  TIME+  ", .description = "Total time the process has spent in user and system time", .flags = 0, .defaultSortDesc = true, },
    [NLWP] = { .name = "NLWP", .title = "NLWP ", .description = "Number of threads in the process", .flags = 0, },
@@ -52,6 +52,7 @@ const ProcessFieldData Process_fields[LAST_PROCESSFIELD] = {
    [PROC_EXE] = { .name = "EXE", .title = "EXE             ", .description = "Basename of exe of the process from /proc/[pid]/exe", .flags = 0, },
    [CWD] = { .name = "CWD", .title = "CWD                       ", .description = "The current working directory of the process", .flags = PROCESS_FLAG_CWD, },
    [TRANSLATED] = { .name = "TRANSLATED", .title = "T ", .description = "Translation info (T translated, N native)", .flags = 0, },
+   [RSS] = { .name = "RSS", .title = "  RSS ", .description = "Resident set size, pages in physical memory, including shared and clean file-backed pages", .flags = 0, .defaultSortDesc = true, },
 };
 
 Process* DarwinProcess_new(const Machine* host) {
@@ -61,6 +62,7 @@ Process* DarwinProcess_new(const Machine* host) {
 
    this->utime = 0;
    this->stime = 0;
+   this->rss = 0;
    this->taskAccess = true;
    this->translated = false;
    this->super.state = UNKNOWN;
@@ -85,6 +87,7 @@ static void DarwinProcess_rowWriteField(const Row* super, RichString* str, Proce
    switch (field) {
    // add Platform-specific fields here
    case TRANSLATED: xSnprintf(buffer, n, "%c ", dp->translated ? 'T' : 'N'); break;
+   case RSS: Row_printKBytes(str, dp->rss, super->host->settings->highlightMegabytes); return;
    default:
       Process_writeField(&dp->super, str, field);
       return;
@@ -101,6 +104,8 @@ static int DarwinProcess_compareByKey(const Process* v1, const Process* v2, Proc
    // add Platform-specific fields here
    case TRANSLATED:
       return SPACESHIP_NUMBER(p1->translated, p2->translated);
+   case RSS:
+      return SPACESHIP_NUMBER(p1->rss, p2->rss);
    default:
       return Process_compareByKey_Base(v1, v2, key);
    }
@@ -389,9 +394,20 @@ void DarwinProcess_setFromLibprocPidinfo(DarwinProcess* proc, DarwinProcessTable
    proc->super.time = total_current_time_ns / 10000000ULL;
    proc->super.nlwp = pti.pti_threadnum;
    proc->super.m_virt = pti.pti_virtual_size / ONE_K;
-   proc->super.m_resident = pti.pti_resident_size / ONE_K;
+   proc->rss = pti.pti_resident_size / ONE_K;
    proc->super.majflt = pti.pti_faults;
-   proc->super.percent_mem = (double)pti.pti_resident_size * 100.0 / (double)dhost->host_info.max_mem;
+
+   /* The memory footprint (as reported by Activity Monitor) is a better measure
+      of process memory usage than the resident size, which also counts shared
+      and clean file-backed pages; fall back to the latter if unavailable */
+   uint64_t memory_size = pti.pti_resident_size;
+   if (proc->super.super.host->settings->ss->flags & PROCESS_FLAG_DARWIN_FOOTPRINT) {
+      struct rusage_info_v0 ri;
+      if (proc_pid_rusage(Process_getPid(&proc->super), RUSAGE_INFO_V0, (rusage_info_t*)&ri) == 0)
+         memory_size = ri.ri_phys_footprint;
+   }
+   proc->super.m_resident = memory_size / ONE_K;
+   proc->super.percent_mem = (double)memory_size * 100.0 / (double)dhost->host_info.max_mem;
 
    proc->stime = system_time_ns;
    proc->utime = user_time_ns;

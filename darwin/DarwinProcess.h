@@ -13,13 +13,15 @@ in the source distribution for its full text.
 #include "darwin/DarwinProcessTable.h"
 
 
-#define PROCESS_FLAG_TTY 0x00000100
+#define PROCESS_FLAG_TTY              0x00000100
+#define PROCESS_FLAG_DARWIN_FOOTPRINT 0x00000200
 
 typedef struct DarwinProcess_ {
    Process super;
 
    uint64_t utime;
    uint64_t stime;
+   uint64_t rss; /* in KiB */
    bool taskAccess;
    bool translated;
 } DarwinProcess;
