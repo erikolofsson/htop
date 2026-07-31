@@ -22,6 +22,15 @@ typedef struct DarwinProcess_ {
    uint64_t utime;
    uint64_t stime;
    uint64_t rss; /* in KiB */
+
+   /* Cumulative storage I/O in bytes, ULLONG_MAX if unavailable */
+   uint64_t io_read_bytes;
+   uint64_t io_write_bytes;
+   uint64_t io_last_scan_time_ms;
+   /* Storage I/O rates in bytes per second, NAN if unavailable */
+   double io_rate_read_bps;
+   double io_rate_write_bps;
+
    bool taskAccess;
    bool translated;
 } DarwinProcess;

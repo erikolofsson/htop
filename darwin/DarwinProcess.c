@@ -10,6 +10,8 @@ in the source distribution for its full text.
 #include "darwin/DarwinProcess.h"
 
 #include <libproc.h>
+#include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +19,7 @@ in the source distribution for its full text.
 #include <sys/dirent.h>
 
 #include "CRT.h"
+#include "Macros.h"
 #include "Process.h"
 #include "darwin/DarwinMachine.h"
 #include "darwin/Platform.h"
@@ -53,6 +56,9 @@ const ProcessFieldData Process_fields[LAST_PROCESSFIELD] = {
    [CWD] = { .name = "CWD", .title = "CWD                       ", .description = "The current working directory of the process", .flags = PROCESS_FLAG_CWD, },
    [TRANSLATED] = { .name = "TRANSLATED", .title = "T ", .description = "Translation info (T translated, N native)", .flags = 0, },
    [RSS] = { .name = "RSS", .title = "  RSS ", .description = "Resident set size, pages in physical memory, including shared and clean file-backed pages", .flags = 0, .defaultSortDesc = true, },
+   [IO_READ_RATE] = { .name = "IO_READ_RATE", .title = "  DISK READ ", .description = "The storage read rate of the process in bytes per second (as in Activity Monitor)", .flags = PROCESS_FLAG_IO, .defaultSortDesc = true, },
+   [IO_WRITE_RATE] = { .name = "IO_WRITE_RATE", .title = " DISK WRITE ", .description = "The storage write rate of the process in bytes per second (as in Activity Monitor)", .flags = PROCESS_FLAG_IO, .defaultSortDesc = true, },
+   [IO_RATE] = { .name = "IO_RATE", .title = "   DISK R/W ", .description = "Total storage I/O rate of the process in bytes per second", .flags = PROCESS_FLAG_IO, .defaultSortDesc = true, },
 };
 
 Process* DarwinProcess_new(const Machine* host) {
@@ -63,6 +69,11 @@ Process* DarwinProcess_new(const Machine* host) {
    this->utime = 0;
    this->stime = 0;
    this->rss = 0;
+   this->io_read_bytes = ULLONG_MAX;
+   this->io_write_bytes = ULLONG_MAX;
+   this->io_last_scan_time_ms = 0;
+   this->io_rate_read_bps = NAN;
+   this->io_rate_write_bps = NAN;
    this->taskAccess = true;
    this->translated = false;
    this->super.state = UNKNOWN;
@@ -77,8 +88,22 @@ void Process_delete(Object* cast) {
    free(this);
 }
 
+static double DarwinProcess_totalIORate(const DarwinProcess* dp) {
+   double totalRate = NAN;
+   if (isNonnegative(dp->io_rate_read_bps)) {
+      totalRate = dp->io_rate_read_bps;
+      if (isNonnegative(dp->io_rate_write_bps)) {
+         totalRate += dp->io_rate_write_bps;
+      }
+   } else if (isNonnegative(dp->io_rate_write_bps)) {
+      totalRate = dp->io_rate_write_bps;
+   }
+   return totalRate;
+}
+
 static void DarwinProcess_rowWriteField(const Row* super, RichString* str, ProcessField field) {
    const DarwinProcess* dp = (const DarwinProcess*) super;
+   bool coloring = super->host->settings->highlightMegabytes;
 
    char buffer[256]; buffer[255] = '\0';
    int attr = CRT_colors[DEFAULT_COLOR];
@@ -87,7 +112,10 @@ static void DarwinProcess_rowWriteField(const Row* super, RichString* str, Proce
    switch (field) {
    // add Platform-specific fields here
    case TRANSLATED: xSnprintf(buffer, n, "%c ", dp->translated ? 'T' : 'N'); break;
-   case RSS: Row_printKBytes(str, dp->rss, super->host->settings->highlightMegabytes); return;
+   case RSS: Row_printKBytes(str, dp->rss, coloring); return;
+   case IO_READ_RATE: Row_printRate(str, dp->io_rate_read_bps, coloring); return;
+   case IO_WRITE_RATE: Row_printRate(str, dp->io_rate_write_bps, coloring); return;
+   case IO_RATE: Row_printRate(str, DarwinProcess_totalIORate(dp), coloring); return;
    default:
       Process_writeField(&dp->super, str, field);
       return;
@@ -106,6 +134,12 @@ static int DarwinProcess_compareByKey(const Process* v1, const Process* v2, Proc
       return SPACESHIP_NUMBER(p1->translated, p2->translated);
    case RSS:
       return SPACESHIP_NUMBER(p1->rss, p2->rss);
+   case IO_READ_RATE:
+      return compareRealNumbers(p1->io_rate_read_bps, p2->io_rate_read_bps);
+   case IO_WRITE_RATE:
+      return compareRealNumbers(p1->io_rate_write_bps, p2->io_rate_write_bps);
+   case IO_RATE:
+      return compareRealNumbers(DarwinProcess_totalIORate(p1), DarwinProcess_totalIORate(p2));
    default:
       return Process_compareByKey_Base(v1, v2, key);
    }
@@ -401,10 +435,25 @@ void DarwinProcess_setFromLibprocPidinfo(DarwinProcess* proc, DarwinProcessTable
       of process memory usage than the resident size, which also counts shared
       and clean file-backed pages; fall back to the latter if unavailable */
    uint64_t memory_size = pti.pti_resident_size;
-   if (proc->super.super.host->settings->ss->flags & PROCESS_FLAG_DARWIN_FOOTPRINT) {
-      struct rusage_info_v0 ri;
-      if (proc_pid_rusage(Process_getPid(&proc->super), RUSAGE_INFO_V0, (rusage_info_t*)&ri) == 0)
+   if (proc->super.super.host->settings->ss->flags & (PROCESS_FLAG_DARWIN_FOOTPRINT | PROCESS_FLAG_IO)) {
+      struct rusage_info_v2 ri;
+      if (proc_pid_rusage(Process_getPid(&proc->super), RUSAGE_INFO_V2, (rusage_info_t*)&ri) == 0) {
          memory_size = ri.ri_phys_footprint;
+
+         uint64_t time_delta_ms = saturatingSub(dhost->super.realtimeMs, proc->io_last_scan_time_ms);
+         if (proc->io_last_scan_time_ms > 0 && time_delta_ms > 0 && proc->io_read_bytes != ULLONG_MAX) {
+            proc->io_rate_read_bps = saturatingSub(ri.ri_diskio_bytesread, proc->io_read_bytes) * /*ms to s*/1000.0 / time_delta_ms;
+            proc->io_rate_write_bps = saturatingSub(ri.ri_diskio_byteswritten, proc->io_write_bytes) * /*ms to s*/1000.0 / time_delta_ms;
+         }
+         proc->io_read_bytes = ri.ri_diskio_bytesread;
+         proc->io_write_bytes = ri.ri_diskio_byteswritten;
+      } else {
+         proc->io_rate_read_bps = NAN;
+         proc->io_rate_write_bps = NAN;
+         proc->io_read_bytes = ULLONG_MAX;
+         proc->io_write_bytes = ULLONG_MAX;
+      }
+      proc->io_last_scan_time_ms = dhost->super.realtimeMs;
    }
    proc->super.m_resident = memory_size / ONE_K;
    proc->super.percent_mem = (double)memory_size * 100.0 / (double)dhost->host_info.max_mem;
