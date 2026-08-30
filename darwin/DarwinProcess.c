@@ -521,15 +521,14 @@ void DarwinProcess_scanThreads(DarwinProcess* dp, DarwinProcessTable* dpt) {
 
       uint64_t tid = identifer_info.thread_id;
 
+      dpt->super.totalTasks++;
+
+      if (hideUserlandThreads)
+         continue;
+
       bool preExisting;
       Process *tprocess = ProcessTable_getProcess(&dpt->super, (pid_t)tid, &preExisting, DarwinProcess_new);
       tprocess->super.updated = true;
-      dpt->super.totalTasks++;
-
-      if (hideUserlandThreads) {
-         tprocess->super.show = false;
-         continue;
-      }
 
       pid_t tprocessPid = Process_getPid(tprocess);
       assert(tprocessPid >= 0);
