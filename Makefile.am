@@ -10,6 +10,7 @@ dist_man_MANS = htop.1
 EXTRA_DIST = \
 	$(dist_man_MANS) \
 	autogen.sh \
+	scripts/build-macos.sh \
 	htop.desktop \
 	htop.png \
 	htop.svg \
