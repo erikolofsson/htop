@@ -91,8 +91,27 @@ sudo pacman -S --needed base-devel ncurses
 
 **macOS**
 ~~~ shell
-brew install ncurses automake autoconf gcc
+./scripts/build-macos.sh
 ~~~
+
+This script builds the current checkout with the macOS dependencies and default
+features used by [Homebrew's htop formula](https://github.com/Homebrew/homebrew-core/blob/HEAD/Formula/h/htop.rb).
+It installs missing `autoconf`, `automake`, `libtool`, `pkgconf`, and `ncurses`
+packages, then cleans, configures, and builds `./htop`. It explicitly uses
+Homebrew's ncurses to enable mouse-wheel scrolling. Homebrew and the Apple command
+line tools (`xcode-select --install`) must already be installed.
+
+Run the resulting binary with `./htop`. By default the script only builds.
+Set `JOBS` to limit parallel compilation, for example
+`JOBS=4 ./scripts/build-macos.sh`.
+
+To also install into `/usr/local`, run:
+~~~ shell
+./scripts/build-macos.sh --install
+~~~
+Run the script without `sudo`: it uses `sudo` only for the final `make install`
+step. Set `PREFIX` to choose another installation directory, for example
+`PREFIX=/opt/htop ./scripts/build-macos.sh --install`.
 
 ### Compile from source:
 To compile from source, download from the Git repository (`git clone` or downloads from [GitHub releases](https://github.com/htop-dev/htop/releases/)), then run:
