@@ -10,9 +10,11 @@ in the source distribution for its full text.
 #include "ScreenManager.h"
 
 #include <assert.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/time.h>
 
 #include "CRT.h"
@@ -248,7 +250,6 @@ void ScreenManager_run(ScreenManager* this, Panel** lastFocus, int* lastKey, con
    double oldTime = 0.0;
 
    int ch = ERR;
-   int closeTimeout = 0;
 
    bool timedOut = true;
    bool redraw = true;
@@ -275,7 +276,6 @@ void ScreenManager_run(ScreenManager* this, Panel** lastFocus, int* lastKey, con
          }
       }
 
-      int prevCh = ch;
       ch = Panel_getCh(panelFocus);
 
       HandlerResult result = IGNORED;
@@ -339,14 +339,13 @@ void ScreenManager_run(ScreenManager* this, Panel** lastFocus, int* lastKey, con
       if (ch == ERR) {
          if (sortTimeout > 0)
             sortTimeout--;
-         if (prevCh == ch && !timedOut) {
-            closeTimeout++;
-            if (closeTimeout == 100) {
-               break;
-            }
-         } else {
-            closeTimeout = 0;
-         }
+
+         // ncurses also returns ERR for ignored mouse events, which can arrive
+         // in bursts. Only stop when the input descriptor is actually closed.
+         struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
+         if (poll(&pfd, 1, 0) > 0 && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)))
+            break;
+
          redraw = false;
          continue;
       }
